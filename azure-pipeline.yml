@@ -1,0 +1,43 @@
+trigger:
+- main  # Trigger when changes are pushed to the 'main' branch
+
+pool:
+  vmImage: 'ubuntu-latest'  # Use Ubuntu agent for building
+
+variables:
+  imageName: 'demo-api-app'  # Name of the Docker image
+  registry: 'yourjfrogrepo.jfrog.io'  # Your Artifactory URL
+  dockerRegistry: 'yourjfrogrepo'  # Docker registry name
+  artifactoryUser: $(ARTIFACTORY_USER)  # Artifactory user (should be set in pipeline secrets)
+  artifactoryPassword: $(ARTIFACTORY_PASSWORD)  # Artifactory password (should be set in pipeline secrets)
+
+steps:
+# Checkout the code
+- task: Checkout@1
+  inputs:
+    clean: true
+
+# Log into JFrog Artifactory
+- task: Docker@2
+  inputs:
+    containerRegistry: $(dockerRegistry)
+    repository: $(registry)/$(imageName)
+    command: login
+    dockerRegistryEndpoint: 'jfrog-endpoint'  # You can define this in the Azure DevOps service connections
+
+# Build the Docker image
+- task: Docker@2
+  inputs:
+    containerRegistry: $(dockerRegistry)
+    repository: $(registry)/$(imageName)
+    command: build
+    dockerfile: '**/Dockerfile'
+    tags: latest
+
+# Push the Docker image to JFrog Artifactory
+- task: Docker@2
+  inputs:
+    containerRegistry: $(dockerRegistry)
+    repository: $(registry)/$(imageName)
+    command: push
+    tags: latest
