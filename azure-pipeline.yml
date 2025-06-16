@@ -46,20 +46,20 @@ stages:
               --build-arg BUILD_NUMBER=$(Build.BuildNumber)
 
         # Run Twistlock scan if not master
-        - ${{ if ne(variables['Build.SourceBranch'], 'refs/heads/master') }}:
-            - template: step-run-twistlockcloudscan.yml@core-entauto-azdo-templates-security
-              parameters:
-                imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+        - template: step-run-twistlockcloudscan.yml@core-entauto-azdo-templates-security
+          parameters:
+            imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+          condition: and(succeeded(), ne(variables['Build.SourceBranchName'], 'master'))
 
         # Run Checkmarx scan if not master
-        - ${{ if ne(variables['Build.SourceBranch'], 'refs/heads/master') }}:
-            - template: step-run-checkmarx-scan.yml@core-entauto-azdo-templates-security
-              parameters:
-                imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+        - template: step-run-checkmarx-scan.yml@core-entauto-azdo-templates-security
+          parameters:
+            imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+          condition: and(succeeded(), ne(variables['Build.SourceBranchName'], 'master'))
 
         # Push the image if the source branch is master
-        - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/master') }}:
-            - template: step-push-image.yml@core-entauto-azdo-templates-docker
+        - template: step-push-image.yml@core-entauto-azdo-templates-docker
+          condition: eq(variables['Build.SourceBranchName'], 'master')
 
         # Clean up old images
         - template: step-cleanup-images.yml@core-entauto-azdo-templates-docker
@@ -85,7 +85,7 @@ stages:
         
         # Upload Helm charts to Artifactory (only for master)
         - task: JFrogGenericArtifacts@1
-          condition: eq(variables['Build.SourceBranch'], 'refs/heads/master')
+          condition: eq(variables['Build.SourceBranchName'], 'master')
           inputs:
             command: 'Upload'
             connection: 'svdevops@artifactory_v2'
@@ -104,7 +104,7 @@ stages:
 
         # Push Helm charts to OCI registry (only for master)
         - task: Bash@3
-          condition: eq(variables['Build.SourceBranch'], 'refs/heads/master')
+          condition: eq(variables['Build.SourceBranchName'], 'master')
           inputs:
             targetType: 'inline'
             script: |
