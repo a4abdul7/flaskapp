@@ -1,1 +1,100 @@
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    exclude:
+      - README.md
+
+resources:
+  repositories:
+    - repository: core-entauto-azdo-templates-security
+      type: git
+      name: GMFinancial/core-entauto-azdo-templates-security
+      ref: refs/tags/v3.0-stable
+    - repository: core-entauto-azdo-templates-docker
+      type: git
+      name: GMFinancial/core-entauto-azdo-templates-docker
+      ref: refs/tags/v1.2-stable
+
+variables:
+  - group: core-entauto-pipeline-keys
+
+pool:
+  name: core-entauto-linux-default
+
+stages:
+  - stage: DockerStage
+    displayName: 'Docker Build & Push'
+    jobs:
+      - job: BuildDockerImage
+        displayName: 'Build Docker Image'
+        steps:
+          - template: step-build-image.yml@core-entauto-azdo-templates-docker
+            parameters:
+              serviceConnection: docker.artifactory.gmfinancial.com
+              imageName: $(Build.Repository.Name)
+              tags:
+                - $(Build.BuildNumber)
+                - latest
+              arguments: --build-arg BUILD_NUMBER=$(Build.BuildNumber)
+
+          # Run Twistlock scan if not master
+          - ${{ if ne(variables['Build.SourceBranch'], 'refs/heads/master') }}:
+              - template: step-run-twistlockscan.yml@core-entauto-azdo-templates-security
+                parameters:
+                  imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+
+          # Run Checkmarx scan if not master
+          - ${{ if ne(variables['Build.SourceBranch'], 'refs/heads/master') }}:
+              - template: step-run-checkmarx-scan.yml@core-entauto-azdo-templates-security
+                parameters:
+                  imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+
+          # Push the image if the source branch is master
+          - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/master') }}:
+              - template: step-push-image.yml@core-entauto-azdo-templates-docker
+                parameters:
+                  serviceConnection: docker.artifactory.gmfinancial.com
+                  imageName: $(Build.Repository.Name)
+                  tags:
+                    - $(Build.BuildNumber)
+                    - latest
+
+          # Clean up old images
+          - template: step-cleanup-images.yml@core-entauto-azdo-templates-docker
+
+  - stage: HelmStage
+    displayName: 'Helm Chart Build & Push'
+    jobs:
+      - job: BuildAndPushHelm
+        variables:
+          - group: core-entauto-pipeline-keys
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: 'Package Helm charts'
+            inputs:
+              targetType: 'inline'
+              script: |
+                helm package $(Build.SourceDirectory)/charts --destination $(Build.ArtifactStagingDirectory)
+
+          # Push Helm charts to OCI registry (only for master)
+          - task: Bash@3
+            condition: eq(variables['Build.SourceBranchName'], 'master')
+            displayName: 'Push Helm charts to OCI registry'
+            inputs:
+              targetType: 'inline'
+              script: |
+                helm registry login -u $(ARTIFACTORY_USERNAME) -p $(ARTIFACTORY_PASSWORD) $(HELM_REGISTRY)
+                echo "Pushing charts to $OCI_REGISTRY"
+                for chart in $(System.DefaultWorkingDirectory)/*.tgz; do
+                  echo "Pushing $chart"
+                  helm push $chart $OCI_REGISTRY
+                done
+            env:
+              ARTIFACTORY_PASSWORD: $(sdevops_encrypted_password)
+              ARTIFACTORY_USERNAME: sdevops
+              HELM_REGISTRY: docker.artifactory.gmfinancial.com
+              OCI_REGISTRY: oci://docker.artifactory.gmg
 
