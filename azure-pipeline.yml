@@ -1,10 +1,7 @@
-name: $(BuildId)
-
 trigger:
   branches:
     include:
       - master
-  paths:
     exclude:
       - README.md
 
@@ -26,97 +23,90 @@ pool:
   name: core-entauto-linux-default
 
 stages:
+  - stage: DockerStage
+    displayName: 'Docker Build & Push'
+    jobs:
+      - job: BuildDockerImage
+        displayName: 'Build Docker Image'
+        steps:
+          - template: step-build-image.yml@core-entauto-azdo-templates-docker
+            parameters:
+              serviceConnection: 'docker.artifactory.gmfinancial.com'
+              imageName: $(Build.Repository.Name)
+              tags:
+                - $(Build.BuildNumber)
+                - latest
+              arguments: '--build-arg BUILD_NUMBER=$(Build.BuildNumber)'
 
-# Docker Stage
-- stage: DockerStage
-  displayName: 'Docker Build & Push'
-  jobs:
-    - job: BuildDockerImage
-      displayName: 'Build Docker Image'
-      steps:
-        # Build Docker Image
-        - template: step-build-image.yml@core-entauto-azdo-templates-docker
-          parameters:
-            serviceConnection: 'docker.artifactory.gmfinancial.com'
-            imageName: $(Build.Repository.Name)
-            tags: |
-              $(Build.BuildNumber)
-              latest
-            arguments: |
-              --build-arg BUILD_NUMBER=$(Build.BuildNumber)
+          # Run Twistlock scan if not master
+          - template: step-run-twistlockscan.yml@core-entauto-azdo-templates-security
+            parameters:
+              imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+            condition: and(succeeded(), not(eq(variables['Build.SourceBranchName'], 'master')))
 
-        # Run Twistlock scan if not master
-        - template: step-run-twistlockcloudscan.yml@core-entauto-azdo-templates-security
-          parameters:
-            imageName: $(Build.Repository.Name):$(Build.BuildNumber)
-          condition: and(succeeded(), ne(variables['Build.SourceBranchName'], 'master'))
+          # Run Checkmarx scan if not master
+          - template: step-run-checkmarx-scan.yml@core-entauto-azdo-templates-security
+            parameters:
+              imageName: $(Build.Repository.Name):$(Build.BuildNumber)
+            condition: and(succeeded(), not(eq(variables['Build.SourceBranchName'], 'master')))
 
-        # Run Checkmarx scan if not master
-        - template: step-run-checkmarx-scan.yml@core-entauto-azdo-templates-security
-          parameters:
-            imageName: $(Build.Repository.Name):$(Build.BuildNumber)
-          condition: and(succeeded(), ne(variables['Build.SourceBranchName'], 'master'))
+          # Push the image if the source branch is master
+          - template: step-push-image.yml@core-entauto-azdo-templates-docker
+            condition: eq(variables['Build.SourceBranchName'], 'master')
 
-        # Push the image if the source branch is master
-        - template: step-push-image.yml@core-entauto-azdo-templates-docker
-          condition: eq(variables['Build.SourceBranchName'], 'master')
+          # Clean up old images
+          - template: step-cleanup-images.yml@core-entauto-azdo-templates-docker
 
-        # Clean up old images
-        - template: step-cleanup-images.yml@core-entauto-azdo-templates-docker
+  - stage: HelmStage
+    displayName: 'Helm Chart Build & Push'
+    dependsOn: DockerStage
+    jobs:
+      - job: BuildAndPushHelm
+        variables:
+          - group: core-entauto-pipeline-keys
+        steps:
+          - checkout: self
+          - task: Bash@3
+            inputs:
+              targetType: 'inline'
+              script: |
+                helm package $(Build.SourceDirectory)/charts --destination $(Build.ArtifactDevDirectory)
+            displayName: 'Package Helm charts'
 
-# Helm Stage
-- stage: HelmStage
-  displayName: 'Helm Chart Build & Push'
-  dependsOn: DockerStage # Ensure Helm tasks run after Docker tasks
-  jobs:
-    - job: BuildAndPushHelm
-      displayName: 'Build Helm Chart'
-      variables:
-        - group: core-entauto-pipeline-keys
+          # Upload Helm charts to Artifactory (only for master)
+          - task: JFrogGenericArtifacts@0
+            condition: eq(variables['Build.SourceBranchName'], 'master')
+            inputs:
+              command: 'Upload'
+              connection: 'svdevops@artifactory_v2'
+              specSource: 'taskConfiguration'
+              fileSpec: |
+                {
+                  "Files": [
+                    {
+                      "pattern": "$(System.DefaultWorkingDirectory)/*.tgz",
+                      "target": "local-helm"
+                    }
+                  ]
+                }
+            failOnError: true
+            displayName: 'Upload results to Artifactory'
 
-      steps:
-        - checkout: self
-        - task: Bash@3
-          inputs:
-            targetType: 'inline'
-            script: |
-              helm package $(Build.SourceDirectory)/charts --destination $(Build.ArtifactDevDirectory)
-          displayName: 'Package Helm charts'
-        
-        # Upload Helm charts to Artifactory (only for master)
-        - task: JFrogGenericArtifacts@1
-          condition: eq(variables['Build.SourceBranchName'], 'master')
-          inputs:
-            command: 'Upload'
-            connection: 'svdevops@artifactory_v2'
-            specSource: 'taskConfiguration'
-            fileSpec: |
-              {
-                "files": [
-                  {
-                    "pattern": "$(System.DefaultWorkingDirectory)/*.tgz",
-                    "target": "local-helm"
-                  }
-                ]
-              }
-          failNoOp: true
-          displayName: 'Upload results to Artifactory'
-
-        # Push Helm charts to OCI registry (only for master)
-        - task: Bash@3
-          condition: eq(variables['Build.SourceBranchName'], 'master')
-          inputs:
-            targetType: 'inline'
-            script: |
-              helm registry login -u $ARTIFACTORY_USERNAME -p $ARTIFACTORY_PASSWORD $HELM_REGISTRY
-              echo "Pushing charts to $OCI_REGISTRY"
-              for chart in $(System.DefaultWorkingDirectory)/*.tgz; do
-                echo "Pushing $chart"
-                helm push $chart $OCI_REGISTRY
-              done
-          displayName: 'Push Helm charts to OCI registry'
-          env:
-            ARTIFACTORY_PASSWORD: $(svcdevops_encrypted_password)
-            ARTIFACTORY_USERNAME: svdevops
-            HELM_REGISTRY: docker.artifactory.gmfinancial.com
-            OCI_REGISTRY: oci://docker.artifactory.gmg
+          # Push Helm charts to OCI registry (only for master)
+          - task: Bash@3
+            condition: eq(variables['Build.SourceBranchName'], 'master')
+            inputs:
+              targetType: 'inline'
+              script: |
+                helm registry login -u $(ARTIFACTORY_USERNAME) -p $(ARTIFACTORY_PASSWORD) $HELM_REGISTRY
+                echo "Pushing charts to $OCI_REGISTRY"
+                for chart in $(System.DefaultWorkingDirectory)/*.tgz; do
+                  echo "Pushing $chart"
+                  helm push $chart $OCI_REGISTRY
+                done
+            displayName: 'Push Helm charts to OCI registry'
+            env:
+              ARTIFACTORY_PASSWORD: $(svdevops_encrypted_password)
+              ARTIFACTORY_USERNAME: svdevops
+              HELM_REGISTRY: docker.artifactory.gmfinancial.com
+              OCI_REGISTRY: oci://docker.artifactory.gmg
